@@ -180,7 +180,7 @@ def train_hmm_per_class(X_train, y_train, n_components=3, n_iter=100):
     """
     models = {}
     print("Reducing dimensionality with PCA for HMM input...")
-    pca = PCA(n_components=2)  # Keep it low to avoid huge parameter count
+    pca = PCA(n_components=1)  # Keep it low to avoid huge parameter count
     X_train_reduced = pca.fit_transform(X_train)
 
     for label in np.unique(y_train):
