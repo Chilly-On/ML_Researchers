@@ -15,6 +15,11 @@ from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
 from catboost import CatBoostClassifier
 from sklearn.model_selection import GridSearchCV
+from hmmlearn.hmm import GaussianHMM
+from sklearn.decomposition import TruncatedSVD
+from sklearn.pipeline import Pipeline
+import numpy as np
+from sklearn.decomposition import PCA
 
 def load_data(filepath):
     """Load processed data."""
@@ -26,7 +31,7 @@ def split_data(data, target_column, test_size=0.2, random_state=42):
     y = data[target_column]
     return train_test_split(X, y, test_size=test_size, random_state=random_state)
 
-def tune_hyperparameters(X_train, y_train):
+def tune_hyperparameters(X_train, y_train, X_val, y_val):
     """
     Tune hyperparameters for each model using GridSearchCV.
     
@@ -154,8 +159,114 @@ def tune_hyperparameters(X_train, y_train):
         best_models[name] = grid_search.best_estimator_
         print(f"Best parameters for {name}: {grid_search.best_params_}")
         print(f"Validation accuracy for {name}: {grid_search.best_score_}")
+    
+    param_grid = {
+        "n_components": [2, 3],
+        "covariance_type": ["diag"],
+        "n_iter": [100, 200]
+    }
 
+    best_hmm_models = tune_hmm(X_train.to_numpy(), y_train.to_numpy(), X_val.to_numpy(), y_val.to_numpy(), param_grid)
+    best_models["HMM"] = best_hmm_models
+
+    # hmm = GaussianHMM(n_components=2, covariance_type="diag", n_iter=200)
+    # hmm.fit(X_train)
+    # best_models["HMM"] = hmm
     return best_models
+
+def train_hmm_per_class(X_train, y_train, n_components=3, n_iter=100):
+    """
+    Train one GaussianHMM per class on PCA-reduced features.
+    """
+    models = {}
+    print("Reducing dimensionality with PCA for HMM input...")
+    pca = PCA(n_components=2)  # Keep it low to avoid huge parameter count
+    X_train_reduced = pca.fit_transform(X_train)
+
+    for label in np.unique(y_train):
+        print(f"Training HMM for class {label}...")
+        X_class = X_train_reduced[y_train == label]
+
+        # Treat each row as a 1-step sequence
+        model = GaussianHMM(n_components=n_components, n_iter=n_iter,
+                            covariance_type="diag", random_state=42)
+
+        # Fit as a single concatenated sequence, with lengths telling how many "sequences"
+        lengths = [1] * len(X_class)
+        model.fit(X_class, lengths)
+        models[label] = model
+
+    return models
+
+def predict_hmm(models, X_test):
+    """
+    Predict classes using trained HMMs by selecting the model with the highest likelihood.
+
+    Args:
+        models (dict): A dictionary where keys are class labels and values are trained GaussianHMMs.
+        X_test (np.ndarray or pd.DataFrame): Test data of shape (n_samples, n_features).
+
+    Returns:
+        list: Predicted class labels.
+    """
+    X = X_test.to_numpy() if hasattr(X_test, "to_numpy") else X_test
+    predictions = []
+
+    for sample in X:
+        sample = sample.reshape(1, -1)  # ensure 2D shape
+        scores = {}
+
+        for label, model in models.items():
+            try:
+                score = model.score(sample)
+                scores[label] = score
+            except:
+                scores[label] = float('-inf')  # fallback if model can't score
+
+        best_label = max(scores, key=scores.get)
+        predictions.append(best_label)
+
+    return predictions
+
+def tune_hmm(X_train, y_train, X_val, y_val, param_grid):
+    best_score = float('-inf')
+    best_model = None
+
+    for n_components in param_grid["n_components"]:
+        for covariance_type in param_grid["covariance_type"]:
+            for n_iter in param_grid["n_iter"]:
+                try:
+                    # Fit one HMM per class
+                    models = {}
+                    classes = np.unique(y_train)
+                    for label in classes:
+                        model = GaussianHMM(n_components=n_components,
+                                            covariance_type=covariance_type,
+                                            n_iter=n_iter)
+                        X_class = X_train[y_train == label]
+                        model.fit(X_class)
+                        models[label] = model
+                    
+                    # Predict by max likelihood
+                    preds = []
+                    for x in X_val:
+                        scores = {label: model.score([x]) for label, model in models.items()}
+                        preds.append(max(scores, key=scores.get))
+
+                    acc = accuracy_score(y_val, preds)
+
+                    if acc > best_score:
+                        best_score = acc
+                        best_model = models
+                        print(f"New best model: acc={acc:.4f}, n_components={n_components}, "
+                              f"cov_type={covariance_type}, n_iter={n_iter}")
+
+                except Exception as e:
+                    print(f"Failed with n_components={n_components}, cov_type={covariance_type}, "
+                          f"n_iter={n_iter} due to {e}")
+                    continue
+
+    return best_model
 
 def train_models(X_train, y_train):
     """Train multiple machine learning models."""
@@ -194,18 +305,27 @@ def train_models(X_train, y_train):
         print(f"Training {name}...")
         model.fit(X_train, y_train)
         trained_models[name] = model
+
+    # Train HMM models per class
+    print("Training Hidden Markov Model (HMM)...")
+    hmm_models = train_hmm_per_class(X_train, y_train)
+    trained_models["HMM"] = hmm_models
+
     return trained_models
 
 def evaluate_models(models, X_test, y_test):
     """Evaluate models and return metrics."""
     results = {}
     for name, model in models.items():
-        y_pred = model.predict(X_test)
+        if name == "HMM":
+            y_pred = predict_hmm(model, X_test)
+        else:
+            y_pred = model.predict(X_test)
         results[name] = {
             "accuracy": accuracy_score(y_test, y_pred),
-            "precision": precision_score(y_test, y_pred, average='weighted'),
-            "recall": recall_score(y_test, y_pred, average='weighted'),
-            "f1": f1_score(y_test, y_pred, average='weighted')
+            "precision": precision_score(y_test, y_pred, average='weighted', zero_division=0),
+            "recall": recall_score(y_test, y_pred, average='weighted', zero_division=0),
+            "f1": f1_score(y_test, y_pred, average='weighted', zero_division=0)
         }
     return results
 
