@@ -1,8 +1,8 @@
-import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import joblib
-
+import os #Here
+import pandas as pd
 # Import all machine learning models
 from sklearn.linear_model import LogisticRegression, RidgeClassifier
 from sklearn.tree import DecisionTreeClassifier
@@ -20,7 +20,7 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.pipeline import Pipeline
 import numpy as np
 from sklearn.decomposition import PCA
-
+from sklearn.preprocessing import StandardScaler #Here
 def load_data(filepath):
     """Load processed data."""
     return pd.read_csv(filepath)
@@ -173,6 +173,87 @@ def tune_hyperparameters(X_train, y_train, X_val, y_val):
     # hmm.fit(X_train)
     # best_models["HMM"] = hmm
     return best_models
+
+def train_reduced_dimension_per_class(X_train, y_train, model_class, pca_components=2, **model_kwargs):
+    """
+    Train a separate model per class with PCA-reduced features.
+
+    Args:
+        X_train (pd.DataFrame): Training features.
+        y_train (pd.Series): Training labels.
+        model_class: scikit-learn model class.
+        pca_components (int): Number of PCA components.
+        model_kwargs: Additional keyword arguments for the model.
+
+    Returns:
+        dict: Dictionary of trained models per class and PCA transformer.
+    """
+    class_models = {}
+    pca = PCA(n_components=pca_components)
+    X_reduced = pca.fit_transform(X_train)
+
+    for label in np.unique(y_train):
+        model = model_class(**model_kwargs)
+        X_class = X_reduced[y_train == label]
+        y_class = y_train[y_train == label]
+        model.fit(X_class, y_class)
+        class_models[label] = model
+
+    return {"models": class_models, "pca": pca}
+def predict_reduced_dimension(per_class_model_dict, X_test):
+    """
+    Predict using per-class reduced dimension models.
+    Select the model with the highest confidence.
+
+    Args:
+        per_class_model_dict (dict): Contains 'models' and 'pca'.
+        X_test (pd.DataFrame): Test data.
+
+    Returns:
+        list: Predicted labels.
+    """
+    models = per_class_model_dict["models"]
+    pca = per_class_model_dict["pca"]
+    X_reduced = pca.transform(X_test)
+    predictions = []
+
+    for x in X_reduced:
+        scores = {}
+        for label, model in models.items():
+            try:
+                if hasattr(model, "predict_proba"):
+                    prob = model.predict_proba([x])[0].max()
+                    scores[label] = prob
+                else:
+                    pred = model.predict([x])[0]
+                    scores[label] = 1.0 if pred == label else 0.0
+            except:
+                scores[label] = float('-inf')
+
+        best_label = max(scores, key=scores.get)
+        predictions.append(best_label)
+
+    return predictions
+
+def tune_reduced_dimension(X_train, y_train, X_val, y_val, model_class, param_grid, pca_components=2):
+    """
+    Tune model on PCA-reduced features with GridSearchCV.
+    """
+    scaler = StandardScaler()
+    pca = PCA(n_components=pca_components)
+    pipeline = Pipeline([
+        ("scaler", scaler),
+        ("pca", pca),
+        ("clf", model_class())
+    ])
+
+    grid = GridSearchCV(pipeline, {"clf__" + k: v for k, v in param_grid.items()}, cv=5, scoring="accuracy")
+    grid.fit(X_train, y_train)
+
+    print(f"Best parameters: {grid.best_params_}")
+    print(f"Validation accuracy: {grid.best_score_:.4f}")
+    return grid.best_estimator_, grid.best_params_
+
 
 def train_hmm_per_class(X_train, y_train, n_components=3, n_iter=100):
     """
@@ -334,5 +415,4 @@ def save_models(models, directory="models/trained/"):
     for name, model in models.items():
         filename = f"{directory}{name.lower().replace(' ', '_')}.pkl"
         joblib.dump(model, filename)
-        print(f"Saved {name} to {filename}")
-
+    print(f"Saved {name} to {filename}")
