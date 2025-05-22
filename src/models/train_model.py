@@ -21,6 +21,11 @@ from sklearn.pipeline import Pipeline
 import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler #Here
+import torch 
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+
 def load_data(filepath):
     """Load processed data."""
     return pd.read_csv(filepath)
@@ -173,6 +178,98 @@ def tune_hyperparameters(X_train, y_train, X_val, y_val):
     # hmm.fit(X_train)
     # best_models["HMM"] = hmm
     return best_models
+
+# Define a simple MLP model
+class MLP(nn.Module):
+    def __init__(self, input_dim):
+        super(MLP, self).__init__()
+        self.model = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
+def train_MLP(X_train, y_train, X_val, y_val, X_test, y_test, input_size, epochs=100, batch_size=32, lr=0.0001):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Convert pandas DataFrames/Series to numpy if needed
+    if hasattr(X_train, 'values'):
+        X_train = X_train.values
+        X_val = X_val.values
+        X_test = X_test.values
+    if hasattr(y_train, 'values'):
+        y_train = y_train.values
+        y_val = y_val.values
+        y_test = y_test.values
+
+    # Convert to PyTorch tensors
+    X_train = torch.tensor(X_train, dtype=torch.float32)
+    y_train = torch.tensor(y_train, dtype=torch.float32).reshape(-1, 1)
+    X_val = torch.tensor(X_val, dtype=torch.float32)
+    y_val = torch.tensor(y_val, dtype=torch.float32).reshape(-1, 1)
+    X_test = torch.tensor(X_test, dtype=torch.float32)
+    y_test = torch.tensor(y_test, dtype=torch.float32).reshape(-1, 1)
+
+    # Create DataLoaders
+    train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=batch_size)
+    test_loader = DataLoader(TensorDataset(X_test, y_test), batch_size=batch_size)
+
+
+    model = MLP(input_size).to(device)
+    criterion = nn.BCELoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    # Training loop
+    for epoch in range(epochs):
+        model.train()
+        train_loss = 0.0
+        for xb, yb in train_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            pred = model(xb)
+            loss = criterion(pred, yb)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item() * xb.size(0)
+
+        train_loss /= len(train_loader.dataset)
+
+        # Validation loss
+        model.eval()
+        val_loss = 0.0
+        correct = 0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                pred = model(xb)
+                loss = criterion(pred, yb)
+                val_loss += loss.item() * xb.size(0)
+                correct += ((pred > 0.5) == yb).sum().item()
+
+        val_loss /= len(val_loader.dataset)
+        val_acc = correct / len(val_loader.dataset)
+
+        print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+
+    # Final test evaluation
+    model.eval()
+    correct = 0
+    with torch.no_grad():
+        for xb, yb in test_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            pred = model(xb)
+            correct += ((pred > 0.5) == yb).sum().item()
+
+    test_acc = correct / len(test_loader.dataset)
+    print(f"Test Accuracy: {test_acc:.4f}")
+    return model
 
 def train_reduced_dimension_per_class(X_train, y_train, model_class, pca_components=2, **model_kwargs):
     """
